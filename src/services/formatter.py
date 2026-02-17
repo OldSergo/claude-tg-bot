@@ -24,72 +24,137 @@ class MessageFormatter:
 
     def _markdown_to_html(self, text: str) -> str:
         """Конвертирует Markdown в Telegram HTML."""
-        # Сначала извлекаем блоки кода, чтобы не обрабатывать их содержимое
+        # 1. Извлекаем блоки кода — их содержимое не трогаем
         code_blocks: list[str] = []
-        placeholder_prefix = "\x00CODEBLOCK"
+        placeholder = "\x00CB"
 
-        def replace_code_block(match: re.Match) -> str:
+        def save_code_block(match: re.Match) -> str:
             lang = match.group(1) or ""
-            code = match.group(2)
-            escaped_code = html.escape(code.strip())
+            code = html.escape(match.group(2).strip())
             if lang:
-                block = f'<pre><code class="language-{html.escape(lang)}">{escaped_code}</code></pre>'
+                block = f'<pre><code class="language-{html.escape(lang)}">{code}</code></pre>'
             else:
-                block = f"<pre>{escaped_code}</pre>"
+                block = f"<pre>{code}</pre>"
             idx = len(code_blocks)
             code_blocks.append(block)
-            return f"{placeholder_prefix}{idx}\x00"
+            return f"{placeholder}{idx}\x00"
 
-        # Заменяем блоки кода на плейсхолдеры
-        result = re.sub(
-            r"```(\w*)\n(.*?)```",
-            replace_code_block,
-            text,
-            flags=re.DOTALL,
-        )
+        result = re.sub(r"```(\w*)\n(.*?)```", save_code_block, text, flags=re.DOTALL)
 
-        # Экранируем HTML-символы (вне блоков кода)
+        # 2. Извлекаем инлайн-код
+        inline_codes: list[str] = []
+        ic_placeholder = "\x00IC"
+
+        def save_inline_code(match: re.Match) -> str:
+            code = html.escape(match.group(1))
+            idx = len(inline_codes)
+            inline_codes.append(f"<code>{code}</code>")
+            return f"{ic_placeholder}{idx}\x00"
+
+        result = re.sub(r"`([^`\n]+)`", save_inline_code, result)
+
+        # 3. Обрабатываем таблицы (до экранирования HTML)
+        result = self._convert_tables(result)
+
+        # 4. Экранируем HTML-символы
         result = html.escape(result)
 
-        # Инлайн-код: `code`
-        result = re.sub(r"`([^`]+)`", r"<code>\1</code>", result)
+        # 5. Горизонтальные линии: --- или *** или ___
+        result = re.sub(r"^[-*_]{3,}\s*$", "———————————", result, flags=re.MULTILINE)
 
-        # Жирный: **text** или __text__
-        result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
-        result = re.sub(r"__(.+?)__", r"<b>\1</b>", result)
+        # 6. Жирный: **text** или __text__
+        result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result, flags=re.DOTALL)
+        result = re.sub(r"__(.+?)__", r"<b>\1</b>", result, flags=re.DOTALL)
 
-        # Курсив: *text* или _text_
-        result = re.sub(r"\*(.+?)\*", r"<i>\1</i>", result)
-        result = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", result)
+        # 7. Курсив: *text* или _text_
+        result = re.sub(r"\*(.+?)\*", r"<i>\1</i>", result, flags=re.DOTALL)
+        result = re.sub(r"(?<!\w)_([^_]+?)_(?!\w)", r"<i>\1</i>", result)
 
-        # Зачёркнутый: ~~text~~
-        result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result)
+        # 8. Зачёркнутый: ~~text~~
+        result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result, flags=re.DOTALL)
 
-        # Заголовки: # Header → жирный текст
+        # 9. Заголовки → жирный текст
         result = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", result, flags=re.MULTILINE)
 
-        # Ссылки: [text](url)
+        # 10. Ссылки: [text](url)
         result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', result)
 
-        # Маркированные списки: - item или * item
+        # 11. Маркированные списки
         result = re.sub(r"^[\-\*]\s+", "• ", result, flags=re.MULTILINE)
 
-        # Нумерованные списки оставляем как есть (Telegram отображает нормально)
+        # 12. Восстанавливаем инлайн-код
+        for idx, code in enumerate(inline_codes):
+            result = result.replace(html.escape(f"{ic_placeholder}{idx}\x00"), code)
 
-        # Восстанавливаем блоки кода
+        # 13. Восстанавливаем блоки кода
         for idx, block in enumerate(code_blocks):
-            result = result.replace(
-                html.escape(f"{placeholder_prefix}{idx}\x00"),
-                block,
-            )
+            result = result.replace(html.escape(f"{placeholder}{idx}\x00"), block)
 
         return result.strip()
 
-    def _split_message(self, text: str) -> list[str]:
-        """Разбивает сообщение на части ≤ MAX_MESSAGE_LENGTH символов.
+    def _convert_tables(self, text: str) -> str:
+        """Конвертирует Markdown-таблицы в читаемый текстовый формат."""
+        lines = text.split("\n")
+        result_lines: list[str] = []
+        i = 0
 
-        Старается не разрывать блоки кода и параграфы.
-        """
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Проверяем, является ли строка началом таблицы
+            if "|" in line and i + 1 < len(lines) and re.match(r"^\|?[\s\-:|]+\|", lines[i + 1].strip()):
+                # Собираем все строки таблицы
+                table_lines: list[str] = []
+                while i < len(lines) and "|" in lines[i]:
+                    table_lines.append(lines[i].strip())
+                    i += 1
+
+                # Парсим таблицу
+                parsed = self._parse_table(table_lines)
+                result_lines.extend(parsed)
+            else:
+                result_lines.append(lines[i])
+                i += 1
+
+        return "\n".join(result_lines)
+
+    def _parse_table(self, table_lines: list[str]) -> list[str]:
+        """Парсит Markdown-таблицу и возвращает текстовый формат."""
+        rows: list[list[str]] = []
+
+        for line in table_lines:
+            # Пропускаем разделительную строку (|---|---|)
+            if re.match(r"^\|?[\s\-:|]+\|?$", line):
+                continue
+
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            rows.append(cells)
+
+        if not rows:
+            return table_lines
+
+        # Форматируем: заголовок жирным, данные — через двоеточие
+        result: list[str] = []
+        headers = rows[0] if rows else []
+
+        for row_idx, row in enumerate(rows):
+            if row_idx == 0 and len(rows) > 1:
+                # Заголовок таблицы — жирный
+                result.append("  ".join(f"**{cell}**" for cell in row))
+            else:
+                # Данные — через " | "
+                if headers and len(row) == len(headers) and len(rows) > 1:
+                    parts = []
+                    for h, v in zip(headers, row):
+                        parts.append(f"**{h}**: {v}")
+                    result.append(" │ ".join(parts))
+                else:
+                    result.append(" │ ".join(row))
+
+        return result
+
+    def _split_message(self, text: str) -> list[str]:
+        """Разбивает сообщение на части ≤ MAX_MESSAGE_LENGTH символов."""
         if len(text) <= MAX_MESSAGE_LENGTH:
             return [text]
 
@@ -101,23 +166,19 @@ class MessageFormatter:
                 parts.append(remaining)
                 break
 
-            # Ищем подходящее место для разрыва
             chunk = remaining[:MAX_MESSAGE_LENGTH]
             split_pos = self._find_split_position(chunk)
 
             parts.append(remaining[:split_pos].rstrip())
-            remaining = remaining[split_pos:].lstrip()
+            remaining = remaining[split_pos:].lstrip("\n")
 
         return parts if parts else ["(пустой ответ)"]
 
     def _find_split_position(self, chunk: str) -> int:
         """Находит оптимальное место для разрыва сообщения."""
-        # Приоритет: конец блока кода → двойной перенос → одинарный перенос → пробел
         for sep in ["</pre>", "\n\n", "\n", " "]:
-            # Ищем последнее вхождение разделителя
             pos = chunk.rfind(sep)
-            if pos > MAX_MESSAGE_LENGTH // 4:  # Не разрываем слишком рано
+            if pos > MAX_MESSAGE_LENGTH // 4:
                 return pos + len(sep)
 
-        # Если ничего не нашли — режем по лимиту
         return MAX_MESSAGE_LENGTH
