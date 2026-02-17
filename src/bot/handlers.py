@@ -72,7 +72,7 @@ async def handle_mention(message: Message, bot: Bot) -> None:
     )
 
     # Отправляем "typing" статус
-    await message.answer_chat_action(ChatAction.TYPING)
+    await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     # Получаем ответ от Claude
     answer = await claude_service.ask(question)
