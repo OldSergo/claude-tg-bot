@@ -36,8 +36,12 @@ class ClaudeService:
 
             if process.returncode != 0:
                 error_text = stderr.decode().strip()
-                logger.error("Claude CLI ошибка (код %d): %s", process.returncode, error_text)
-                return f"⚠️ Ошибка Claude CLI:\n{error_text}"
+                stdout_text = stdout.decode().strip()
+                logger.error(
+                    "Claude CLI ошибка (код %d)\nstderr: %s\nstdout: %s",
+                    process.returncode, error_text, stdout_text,
+                )
+                return f"⚠️ Ошибка Claude CLI:\n{error_text or stdout_text}"
 
             return self._parse_response(stdout.decode())
 
